@@ -10,6 +10,7 @@ use App\Models\Order;
 use GuzzleHttp\Client;
 use GuzzleHttp\Exception\GuzzleException;
 use Illuminate\Database\QueryException;
+use Illuminate\Support\Facades\Blade;
 use PHPUnit\Framework\TestCase;
 use Specrig\Amqp\Bus;
 use Specrig\Backend;
@@ -183,6 +184,18 @@ final class HarnessTest extends TestCase
         $this->shop->boot();
 
         $this->assertNull(Order::find(7));
+    }
+
+    public function testAViewACaseRenderedWithoutEndingARequestLeavesTheNextCaseItsOwnViews(): void
+    {
+        $this->shop->boot();
+        Blade::render('{{ $order }}', ['order' => 7]);
+        $this->shop->dispose();
+
+        $this->shop = new Shop();
+        $this->shop->boot();
+
+        $this->assertSame('8', Blade::render('{{ $order }}', ['order' => 8]));
     }
 
     public function testADatabaseThatFailsRefusesTheServiceUntilTheNextCase(): void
