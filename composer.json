@@ -3,6 +3,10 @@
     "description": "specrig for a Laravel service: the application booted per case, its HTTP client, queues and console stood in for",
     "type": "library",
     "license": "MIT",
+    "support": {
+        "source": "https://github.com/specrig/specrig-php",
+        "issues": "https://github.com/specrig/specrig-php/issues"
+    },
     "require": {
         "php": "^8.2",
         "specrig/specrig": "self.version",
