@@ -1,0 +1,16 @@
+{
+    "name": "specrig/laravel",
+    "description": "specrig for a Laravel service: the application booted per case, its HTTP client, queues and console stood in for",
+    "type": "library",
+    "license": "MIT",
+    "require": {
+        "php": "^8.2",
+        "specrig/specrig": "self.version",
+        "laravel/framework": "^12.0 || ^13.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Specrig\\Laravel\\": "src/"
+        }
+    }
+}
