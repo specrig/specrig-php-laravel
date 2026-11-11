@@ -44,12 +44,20 @@ final class Databases implements Seam
         }
     }
 
+    public function heal(string $address, string $refusing): void
+    {
+        foreach ($this->connections($address, $refusing) as $name) {
+            $this->app['config']->set("database.connections.{$name}.url", $address);
+            $this->app['db']->purge($name);
+        }
+    }
+
     /** @return list<string> */
-    private function connections(string $address): array
+    private function connections(string ...$addresses): array
     {
         $named = [];
         foreach ($this->app['config']->get('database.connections', []) as $name => $connection) {
-            if (($connection['url'] ?? null) === $address) {
+            if (in_array($connection['url'] ?? null, $addresses, true)) {
                 $named[] = (string) $name;
             }
         }

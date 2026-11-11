@@ -11,12 +11,15 @@ use GuzzleHttp\Client;
 use GuzzleHttp\Exception\GuzzleException;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\Blade;
+use Illuminate\Support\Facades\Http;
 use PHPUnit\Framework\TestCase;
 use Specrig\Amqp\Bus;
 use Specrig\Backend;
 use Specrig\Laravel\Harness;
 use Specrig\Postgres;
+use Specrig\Redis;
 use Specrig\Rig;
+use Specrig\Write;
 
 final class Shop extends Harness
 {
@@ -29,6 +32,7 @@ final class Shop extends Harness
     public function __construct(
         public readonly Backend $billing = new Backend('https://billing.shop.test', setting: 'BILLING_URL', contract: '../docs/billing.yaml', failure: 'Error'),
         public readonly Postgres $database = new Postgres('DB_URL'),
+        public readonly Redis $cache = new Redis('REDIS_URL'),
         public readonly Bus $bus = new Bus('RABBIT_URL'),
     ) {
         parent::__construct();
@@ -96,6 +100,17 @@ final class HarnessTest extends TestCase
         $this->assertSame(['billing was called where no step declared its answer: GET /invoices/7'], $this->shop->failures());
     }
 
+    public function testAReplyToATemplateAnswersTheServiceAndItsRequestsAreReadBackByIt(): void
+    {
+        $this->placed(7);
+        $this->shop->billing->reply('GET', '/invoices/{orderId}', 200, ['order' => 7, 'amount' => 120, 'dueOn' => '2026-11-10']);
+
+        $this->shop->http()->get('/api/orders/7');
+
+        $this->assertSame([], $this->shop->failures());
+        $this->assertSame(['/invoices/7'], array_map(fn ($r) => $r->path, $this->shop->billing->requests('GET', '/invoices/{orderId}')));
+    }
+
     public function testAnAnswerTheContractDoesNotAllowIsAFailure(): void
     {
         $this->placed(7);
@@ -104,6 +119,16 @@ final class HarnessTest extends TestCase
         $this->shop->http()->get('/api/orders/7');
 
         $this->assertStringContainsString("what billing's contract, ../docs/billing.yaml, does not allow: GET /invoices/7 answered 200", $this->shop->failures()[0] ?? '');
+    }
+
+    public function testTheHeadersAStepGaveAReplyReachTheServicesClient(): void
+    {
+        $this->shop->billing->reply('GET', '/invoices/{orderId}', 200, ['order' => 7, 'amount' => 120, 'dueOn' => '2026-11-10'], ['X-Total' => '1']);
+        $this->shop->boot();
+
+        $response = Http::get('https://billing.shop.test/invoices/7');
+
+        $this->assertSame(['1', 120], [$response->header('X-Total'), $response->json('amount')]);
     }
 
     public function testARequestIsTracedByTheRouteItMatchedAndItsRefusal(): void
@@ -214,5 +239,75 @@ final class HarnessTest extends TestCase
         $this->shop = new Shop();
         $this->shop->boot();
         $this->assertNull(Order::find(7));
+    }
+
+    /** @return resource|false */
+    private function redis()
+    {
+        $address = parse_url((string) $this->shop->app()['config']->get('database.redis.default.url'));
+        return @stream_socket_client("tcp://{$address['host']}:{$address['port']}", $code, $message, 2);
+    }
+
+    public function testARedisThatFailsCutsTheConnectionsTheServiceHoldsAndRefusesNewOnes(): void
+    {
+        $this->shop->http()->get('/api/orders/8');
+        $held = $this->redis();
+        fwrite($held, "PING\r\n");
+        $this->assertSame("+PONG\r\n", fgets($held));
+
+        $this->shop->cache->failWith();
+
+        @fwrite($held, "PING\r\n");
+        $this->assertFalse(@fgets($held));
+        $this->assertFalse($this->redis());
+    }
+
+    public function testADatabaseThatComesBackAnswersAgainWithTheRowsItHeld(): void
+    {
+        $this->placed(7);
+        $this->shop->database->failWith();
+        try {
+            Order::find(7);
+            $this->fail('the database answered');
+        } catch (QueryException) {
+        }
+
+        $this->shop->database->heal();
+
+        $this->assertSame(120, Order::find(7)?->amount);
+    }
+
+    public function testADatabaseThatFailedWithAnErrorComesBackToo(): void
+    {
+        $this->placed(7);
+        $this->shop->database->failWith(new \RuntimeException('the disk is full'));
+        try {
+            Order::find(7);
+            $this->fail('the database answered');
+        } catch (\RuntimeException $e) {
+            $this->assertSame('the disk is full', $e->getMessage());
+        }
+
+        $this->shop->database->heal();
+
+        $this->assertSame(120, Order::find(7)?->amount);
+    }
+
+    public function testATableThatRefusesItsWritesRefusesTheServiceUntilTheDatabaseComesBack(): void
+    {
+        $this->placed(7);
+        $this->shop->database->refuse('orders', Write::Insert);
+
+        try {
+            Order::create(['id' => 8, 'amount' => 80, 'paid' => false]);
+            $this->fail('the insert went through');
+        } catch (QueryException $e) {
+            $this->assertStringContainsString('specrig: insert on orders is refused', $e->getMessage());
+        }
+        $this->assertSame(120, Order::find(7)?->amount);
+
+        $this->shop->database->heal();
+
+        $this->assertSame(80, Order::create(['id' => 8, 'amount' => 80, 'paid' => false])->amount);
     }
 }
