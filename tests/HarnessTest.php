@@ -12,13 +12,17 @@ use GuzzleHttp\Exception\GuzzleException;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\Blade;
 use Illuminate\Support\Facades\Http;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use Specrig\Amqp\Bus;
 use Specrig\Backend;
+use Specrig\Database;
 use Specrig\Laravel\Harness;
+use Specrig\Mysql;
 use Specrig\Postgres;
 use Specrig\Redis;
 use Specrig\Rig;
+use Specrig\Sqlite;
 use Specrig\Write;
 
 final class Shop extends Harness
@@ -31,7 +35,7 @@ final class Shop extends Harness
 
     public function __construct(
         public readonly Backend $billing = new Backend('https://billing.shop.test', setting: 'BILLING_URL', contract: '../docs/billing.yaml', failure: 'Error'),
-        public readonly Postgres $database = new Postgres('DB_URL'),
+        public readonly Database $database = new Postgres('DB_URL'),
         public readonly Redis $cache = new Redis('REDIS_URL'),
         public readonly Bus $bus = new Bus('RABBIT_URL'),
     ) {
@@ -295,6 +299,90 @@ final class HarnessTest extends TestCase
 
     public function testATableThatRefusesItsWritesRefusesTheServiceUntilTheDatabaseComesBack(): void
     {
+        $this->placed(7);
+        $this->shop->database->refuse('orders', Write::Insert);
+
+        try {
+            Order::create(['id' => 8, 'amount' => 80, 'paid' => false]);
+            $this->fail('the insert went through');
+        } catch (QueryException $e) {
+            $this->assertStringContainsString('specrig: insert on orders is refused', $e->getMessage());
+        }
+        $this->assertSame(120, Order::find(7)?->amount);
+
+        $this->shop->database->heal();
+
+        $this->assertSame(80, Order::create(['id' => 8, 'amount' => 80, 'paid' => false])->amount);
+    }
+
+    /** @return iterable<string, array{\Closure(): Database, string, string}> */
+    public static function databases(): iterable
+    {
+        yield 'mysql' => [fn () => new Mysql('DB_URL'), 'mysql', 'Connection refused'];
+        yield 'sqlite' => [fn () => new Sqlite('DB_URL'), 'sqlite', 'unable to open database file'];
+    }
+
+    /** @param \Closure(): Database $database */
+    private function on(\Closure $database, string $connection): void
+    {
+        Shop::$constants = ['DB_CONNECTION' => $connection];
+        $this->shop->dispose();
+        $this->shop = new Shop(database: $database());
+    }
+
+    #[DataProvider('databases')]
+    public function testEveryCaseStartsFromAnEmptyMysqlOrSqliteDatabase(\Closure $database, string $connection): void
+    {
+        $this->on($database, $connection);
+        $this->placed(7);
+        $this->shop->dispose();
+
+        $this->shop = new Shop(database: $database());
+        $this->shop->boot();
+
+        $this->assertNull(Order::find(7));
+    }
+
+    #[DataProvider('databases')]
+    public function testAMysqlOrSqliteDatabaseThatFailsRefusesTheServiceAndComesBackWithTheRowsItHeld(\Closure $database, string $connection, string $refused): void
+    {
+        $this->on($database, $connection);
+        $this->placed(7);
+        $this->shop->database->failWith();
+        try {
+            Order::find(7);
+            $this->fail('the database answered');
+        } catch (QueryException $e) {
+            $this->assertStringContainsString($refused, $e->getMessage());
+        }
+
+        $this->shop->database->heal();
+
+        $this->assertSame(120, Order::find(7)?->amount);
+    }
+
+    #[DataProvider('databases')]
+    public function testAMysqlOrSqliteDatabaseThatFailedWithAnErrorComesBackToo(\Closure $database, string $connection): void
+    {
+        $this->on($database, $connection);
+        $this->placed(7);
+        $this->shop->database->failWith(new \RuntimeException('the disk is full'));
+        try {
+            Order::find(7);
+            $this->fail('the database answered');
+        } catch (\RuntimeException $e) {
+            $this->assertSame('the disk is full', $e->getMessage());
+        }
+
+        $this->shop->database->heal();
+
+        $this->assertSame(120, Order::find(7)?->amount);
+    }
+
+    #[DataProvider('databases')]
+    public function testAMysqlOrSqliteTableThatRefusesItsWritesRefusesTheServiceUntilTheDatabaseComesBack(\Closure $database, string $connection): void
+    {
+        $this->on($database, $connection);
         $this->placed(7);
         $this->shop->database->refuse('orders', Write::Insert);
 
